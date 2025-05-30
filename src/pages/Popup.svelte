@@ -204,6 +204,186 @@
       console.error(`Error saving ${key}:`, e);
     }
   }
+
+  // Export server configurations
+  function exportSettings() {
+    try {
+      const exportData = {
+        version: "1.0.0",
+        exportDate: new Date().toISOString(),
+        servers: servers,
+        settings: {
+          debugLog,
+          darkMode
+        }
+      };
+      
+      const dataStr = JSON.stringify(exportData, null, 2);
+      const dataBlob = new Blob([dataStr], { type: 'application/json' });
+      
+      const url = URL.createObjectURL(dataBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `claude-mcp-settings-${new Date().toISOString().split('T')[0]}.json`;
+      
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      URL.revokeObjectURL(url);
+      status = `Exported ${servers.length} servers`;
+    } catch (e) {
+      status = `Export failed: ${e.message}`;
+      console.error('Export error:', e);
+    }
+  }
+
+  // Import server configurations
+  function importSettings(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    try {
+      const reader = new FileReader();
+      reader.onerror = (error) => {
+        console.error('FileReader error:', error);
+        status = `File read error: ${error.message || 'Unknown error'}`;
+        event.target.value = '';
+      };
+      
+      reader.onload = async (e) => {
+        try {
+          if (!e.target?.result) {
+            throw new Error('No file content received');
+          }
+          
+          const importData = JSON.parse(e.target.result);
+          
+          // Basic validation
+          if (!importData || typeof importData !== 'object') {
+            throw new Error('Invalid format: not a valid JSON object');
+          }
+          
+          if (!importData.servers || !Array.isArray(importData.servers)) {
+            throw new Error('Invalid format: servers array not found');
+          }
+          
+          // Validate each server has required fields
+          for (const [index, server] of importData.servers.entries()) {
+            if (!server || typeof server !== 'object') {
+              throw new Error(`Invalid server at position ${index + 1}: not an object`);
+            }
+            if (!server.name || typeof server.name !== 'string') {
+              throw new Error(`Invalid server at position ${index + 1}: missing or invalid name`);
+            }
+            if (!server.url || typeof server.url !== 'string') {
+              throw new Error(`Invalid server at position ${index + 1}: missing or invalid url`);
+            }
+          }
+          
+          // Ask user with very clear messaging - ADD first (less destructive)
+          const shouldAdd = confirm(
+            `📥 IMPORT ${importData.servers.length} SERVERS\n\n` +
+            `Current servers: ${servers.length}\n` +
+            `Import servers: ${importData.servers.length}\n\n` +
+            `❌ CANCEL = Ask about replacing instead\n` +
+            `✅ OK = ADD/UPDATE servers (update existing by name)\n`
+          );
+          
+          let newServers;
+          if (shouldAdd) {
+            // User chose OK = Add/Update
+            const existingServerMap = new Map(servers.map(s => [s.name, s]));
+            const updatedServers = [...servers];
+            
+            // Add new or update existing servers
+            for (const importServer of importData.servers) {
+              const existingIndex = updatedServers.findIndex(s => s.name === importServer.name);
+              if (existingIndex >= 0) {
+                // Update existing server
+                updatedServers[existingIndex] = { ...importServer };
+              } else {
+                // Add new server
+                updatedServers.push({ ...importServer });
+              }
+            }
+            
+            newServers = updatedServers;
+          } else {
+            // User chose Cancel, ask about replacing instead
+            const shouldReplace = confirm(
+              `📥 REPLACE ALL SERVERS INSTEAD?\n\n` +
+              `Current servers: ${servers.length}\n` +
+              `Import servers: ${importData.servers.length}\n\n` +
+              `❌ CANCEL = Don't import anything\n` +
+              `✅ OK = REPLACE all current servers`
+            );
+            
+            if (shouldReplace) {
+              // User chose OK = Replace all
+              newServers = [...importData.servers];
+            } else {
+              // User really wants to cancel
+              status = 'Import cancelled';
+              event.target.value = '';
+              return;
+            }
+          }
+          
+          // Calculate how many were new vs updated for better status message
+          let addedCount = 0;
+          let updatedCount = 0;
+          
+          if (shouldAdd) {
+            const existingNames = new Set(servers.map(s => s.name));
+            for (const importServer of importData.servers) {
+              if (existingNames.has(importServer.name)) {
+                updatedCount++;
+              } else {
+                addedCount++;
+              }
+            }
+          }
+          
+          // Save servers
+          servers = newServers;
+          await saveToStorage('mcpServers', servers);
+          
+          // Import settings if available
+          if (importData.settings && typeof importData.settings === 'object') {
+            if (importData.settings.debugLog !== undefined) {
+              debugLog = Boolean(importData.settings.debugLog);
+              await saveToStorage('mcpDebugLog', debugLog);
+            }
+            if (importData.settings.darkMode !== undefined) {
+              darkMode = Boolean(importData.settings.darkMode);
+              await saveToStorage('mcpDarkMode', darkMode);
+              updateTheme();
+            }
+          }
+          
+          status = shouldAdd ? 
+            `✅ Added ${addedCount} new, updated ${updatedCount} existing (${newServers.length} total)` : 
+            `✅ Replaced with ${newServers.length} servers`;
+          
+          // Clear file input
+          event.target.value = '';
+          
+        } catch (e) {
+          console.error('Import parsing error:', e);
+          status = `Import failed: ${e.message}`;
+          event.target.value = '';
+        }
+      };
+      
+      reader.readAsText(file);
+      
+    } catch (e) {
+      console.error('Import setup error:', e);
+      status = `Import failed: ${e.message}`;
+      event.target.value = '';
+    }
+  }
 </script>
 
 <div class="w-full max-w-2xl p-3 bg-[hsl(var(--bg-100))] text-[hsl(var(--text-100))] rounded-lg">
@@ -220,6 +400,8 @@
         <label for="name" class="block mb-0.5 text-xs font-medium text-[hsl(var(--text-300))]">Name:</label>
         <input 
           id="name" 
+          name="name"
+          autocomplete="off"
           bind:value={currentServer.name} 
           placeholder="server name" 
           class="input-field"
@@ -230,6 +412,8 @@
         <label for="url" class="block mb-0.5 text-xs font-medium text-[hsl(var(--text-300))]">URL:</label>
         <input 
           id="url" 
+          name="url"
+          autocomplete="off"
           bind:value={currentServer.url} 
           placeholder="SSE URL" 
           class="input-field"
@@ -240,6 +424,8 @@
         <label for="command" class="block mb-0.5 text-xs font-medium text-[hsl(var(--text-300))]">Command:</label>
         <input 
           id="command" 
+          name="command"
+          autocomplete="off"
           bind:value={currentServer.command} 
           placeholder="command to execute" 
           class="input-field"
@@ -264,11 +450,17 @@
           <div class="mt-1">
             <div class="flex gap-1 mb-1">
               <input 
+                id="envKey"
+                name="envKey"
+                autocomplete="off"
                 bind:value={envKey} 
                 placeholder="Key" 
                 class="flex-1 p-1 bg-[hsl(var(--bg-100))] border border-[hsl(var(--border-100))] rounded-md text-[hsl(var(--text-200))] text-xs focus:outline-none focus:ring-1 focus:ring-[hsl(var(--accent-main-100))] focus:border-[hsl(var(--accent-main-100))]"
               />
               <input 
+                id="envValue"
+                name="envValue"
+                autocomplete="off"
                 bind:value={envValue} 
                 placeholder="Value" 
                 class="flex-1 p-1 bg-[hsl(var(--bg-100))] border border-[hsl(var(--border-100))] rounded-md text-[hsl(var(--text-200))] text-xs focus:outline-none focus:ring-1 focus:ring-[hsl(var(--accent-main-100))] focus:border-[hsl(var(--accent-main-100))]"
@@ -301,6 +493,9 @@
         
         <div class="flex gap-1 mb-1">
           <input 
+            id="argInput"
+            name="argInput"
+            autocomplete="off"
             bind:value={argInput} 
             placeholder="Add argument" 
             class="flex-1 p-1 bg-[hsl(var(--bg-100))] border border-[hsl(var(--border-100))] rounded-md text-[hsl(var(--text-200))] text-xs focus:outline-none focus:ring-1 focus:ring-[hsl(var(--accent-main-100))] focus:border-[hsl(var(--accent-main-100))]"
@@ -372,22 +567,55 @@
   </div>
   
   <!-- Footer Controls -->
-  <div class="mt-4 pt-3 border-t border-[hsl(var(--border-100))] flex items-center justify-between">
-    <label class="flex items-center cursor-pointer">
-      <input 
-        type="checkbox" 
-        bind:checked={debugLog} 
-        onchange={() => saveToStorage('mcpDebugLog', debugLog)}
-        class="form-checkbox h-5 w-5 bg-[hsl(var(--bg-100))] border-[hsl(var(--border-100))] rounded text-[hsl(var(--accent-main-100))] focus:ring-[hsl(var(--accent-main-100))] focus:ring-opacity-25 focus:ring-offset-0"
-      />
-      <span class="ml-2 text-sm text-[hsl(var(--text-200))]">Enable Debug Logging</span>
-    </label>
+  <div class="mt-4 pt-3 border-t border-[hsl(var(--border-100))] space-y-3">
+    <!-- Import/Export Section -->
+    <div class="flex items-center justify-between">
+      <div class="flex gap-2">
+        <button 
+          onclick={exportSettings}
+          class="px-3 py-1 text-xs bg-[hsl(var(--accent-main-100))] hover:bg-[hsl(var(--accent-main-000))] text-white rounded-md font-medium"
+        >
+          Export Settings
+        </button>
+        
+        <label class="relative cursor-pointer">
+          <input 
+            type="file" 
+            accept=".json"
+            onchange={importSettings}
+            class="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+          />
+          <span class="block px-3 py-1 text-xs bg-[hsl(var(--bg-300))] hover:bg-[hsl(var(--bg-400))] text-[hsl(var(--text-200))] rounded-md font-medium">
+            Import Settings
+          </span>
+        </label>
+      </div>
+      
+      <button 
+        onclick={toggleDarkMode}
+        class="px-2 py-1 text-xs bg-[hsl(var(--bg-300))] hover:bg-[hsl(var(--bg-400))] rounded-md text-[hsl(var(--text-200))]"
+      >
+        {darkMode ? "Light Mode" : "Dark Mode"}
+      </button>
+    </div>
     
-    <button 
-      onclick={toggleDarkMode}
-      class="px-2 py-1 text-xs bg-[hsl(var(--bg-300))] hover:bg-[hsl(var(--bg-400))] rounded-md text-[hsl(var(--text-200))]"
-    >
-      {darkMode ? "Light Mode" : "Dark Mode"}
-    </button>
+    <!-- Debug Settings -->
+    <div class="flex items-center justify-between">
+      <label class="flex items-center cursor-pointer">
+        <input 
+          id="debugLog"
+          name="debugLog"
+          type="checkbox" 
+          bind:checked={debugLog} 
+          onchange={() => saveToStorage('mcpDebugLog', debugLog)}
+          class="form-checkbox h-4 w-4 bg-[hsl(var(--bg-100))] border-[hsl(var(--border-100))] rounded text-[hsl(var(--accent-main-100))] focus:ring-[hsl(var(--accent-main-100))] focus:ring-opacity-25 focus:ring-offset-0"
+        />
+        <span class="ml-2 text-xs text-[hsl(var(--text-200))]">Enable Debug Logging</span>
+      </label>
+      
+      <div class="text-xs text-[hsl(var(--text-300))]">
+        {servers.length} server{servers.length !== 1 ? 's' : ''} configured
+      </div>
+    </div>
   </div>
 </div>
